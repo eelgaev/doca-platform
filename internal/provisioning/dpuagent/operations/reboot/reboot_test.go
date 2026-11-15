@@ -691,6 +691,32 @@ var _ = Describe("Reboot", func() {
 			})
 		})
 
+		DescribeTable("ignores BlueField-3 VIRTIO MSIX pending params",
+			func(pending, reasons string, want provisioningv1.RebootMethodType) {
+				dir := GinkgoT().TempDir()
+				Expect(os.WriteFile(filepath.Join(dir, "mt41692_pciconf0"), nil, 0600)).To(Succeed())
+				out := fmt.Sprintf(`{"reset_needed": true, "command_required": "Power cycle is required",
+  "pending_nvconfig_parameters": [%s], "reasons": [%s]}`, pending, reasons)
+				h := &HandleReboot{mstDevicesPath: dir, runBash: func(string) (bytes.Buffer, bytes.Buffer, error) {
+					return *bytes.NewBufferString(out), bytes.Buffer{}, nil
+				}}
+				optCtx := &operations.Context{RebootMethodDiscovery: true, CurrentBootID: "boot", LatestDPU: &provisioningv1.DPU{}}
+				m, err := h.getRebootMethod(optCtx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(*m).To(Equal(want))
+				Expect(optCtx.CondMessage).To(ContainSubstring("ignored BlueField-3 pending NVCONFIG params"))
+			},
+			Entry("only VIRTIO params pending",
+				`{"name": "VIRTIO_BLK_EMULATION_NUM_MSIX"}, {"name": "VIRTIO_FS_EMULATION_NUM_MSIX"}, {"name": "VIRTIO_NET_EMULATION_NUM_MSIX"}`,
+				`"Pending NVCONFIG parameter change"`, provisioningv1.RebootMethodNoAction),
+			Entry("other params still pending",
+				`{"name": "VIRTIO_NET_EMULATION_NUM_MSIX"}, {"name": "PARAM_A"}`,
+				`"Pending NVCONFIG parameter change"`, provisioningv1.RebootMethodPowerCycle),
+			Entry("other reset reasons remain",
+				`{"name": "VIRTIO_NET_EMULATION_NUM_MSIX"}`,
+				`"Pending NVCONFIG parameter change", "Pending FW update"`, provisioningv1.RebootMethodPowerCycle),
+		)
+
 		It("getRebootMethod returns error when no MST devices are found", func() {
 			dir, err := os.MkdirTemp("", "reboot-mst-empty-dq-")
 			Expect(err).NotTo(HaveOccurred())

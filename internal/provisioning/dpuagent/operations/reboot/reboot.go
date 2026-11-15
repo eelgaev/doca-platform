@@ -80,6 +80,14 @@ var powerCyclePendingNvconfigNames = map[string]struct{}{
 	"INTERNAL_CPU_MODEL":           {},
 }
 
+// ignoredPendingNvconfigNames are reported as pending forever by BlueField-3 firmware (bug).
+// TODO: Remove once the firmware is fixed.
+var ignoredPendingNvconfigNames = map[string]struct{}{
+	"VIRTIO_BLK_EMULATION_NUM_MSIX": {},
+	"VIRTIO_FS_EMULATION_NUM_MSIX":  {},
+	"VIRTIO_NET_EMULATION_NUM_MSIX": {},
+}
+
 // firmwareResetPerDevice is one command line for execFirmwareReset, in MST glob sort order.
 type firmwareResetPerDevice struct {
 	DevicePath string
@@ -396,6 +404,34 @@ func recordPending(optCtx *operations.Context, device string, entries pendingPar
 	})
 }
 
+// removeIgnoredPending drops ignoredPendingNvconfigNames from the pending parameters and reports
+// whether the device then needs no reset (nothing else pending, no other reset reason).
+func removeIgnoredPending(optCtx *operations.Context, device string, out mlxfwresetStatusJSON) (mlxfwresetStatusJSON, bool) {
+	var removed []string
+	kept := pendingParamList{}
+	for _, e := range out.PendingNvconfigParameters {
+		if _, ok := ignoredPendingNvconfigNames[e.Name]; ok {
+			removed = append(removed, e.Name)
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if len(removed) == 0 {
+		return out, false
+	}
+	out.PendingNvconfigParameters = kept
+	optCtx.CondMessage += fmt.Sprintf("device=%s ignored BlueField-3 pending NVCONFIG params: [%s]; ", device, strings.Join(removed, ","))
+	if len(kept) > 0 {
+		return out, false
+	}
+	for _, reason := range out.Reasons {
+		if !strings.EqualFold(strings.TrimSpace(reason), pendingNVConfigReason) {
+			return out, false
+		}
+	}
+	return out, true
+}
+
 // removeForeverPending filters parameters that mlxfwreset keeps reporting as
 // pending across boots and ignores them when they are the only reset reason.
 // TODO: Remove this workaround once the MFT tool is fixed.
@@ -536,7 +572,12 @@ func (h *HandleReboot) getRebootMethodDeviceQuery(optCtx *operations.Context) (*
 		// unchanged across boots. Provisioning continues only when all remaining
 		// pending_nvconfig_parameters are filtered out and "Pending NVCONFIG
 		// parameter change" is the only reason for reset.
-		effective, shouldIgnore := removeForeverPending(optCtx, device, out)
+		filtered, ignore := removeIgnoredPending(optCtx, device, out)
+		if ignore {
+			klog.Infof("MST device %s: only BlueField-3 firmware bug params pending, skipping reset", device)
+			continue
+		}
+		effective, shouldIgnore := removeForeverPending(optCtx, device, filtered)
 		if shouldIgnore {
 			klog.Infof("MST device %s: ignoring repeated pending NVCONFIG parameters after boot change", device)
 			continue
